@@ -1,0 +1,782 @@
+from numpy import string_
+import requests
+import mysql.connector
+import threading
+import datetime
+import time
+import ccxt
+
+from requests import api
+from requests.models import Response
+try:
+    from urllib import urlencode
+# python3
+except ImportError:
+    from urllib.parse import urlencode
+from app.BinanceAPI import BinanceAPI
+from app.Database import Database
+from rsiCalc import rsiFunc
+# from client_trade import client_trade
+
+BASE_URL = "https://fapi.binance.com/fapi/v1"
+arraycoins = ["BTC","ETH","BCH","XRP","EOS","LTC","TRX","ETC","LINK","XLM","ADA","XMR","DASH","ZEC","XTZ","BNB","ATOM","ONT","IOTA","BAT","VET","NEO","QTUM","IOST","THETA","ALGO","ZIL","KNC","ZRX","COMP","OMG","DOGE","SXP","KAVA","BAND","RLC","WAVES","MKR","DOT","YFI","BAL","CRV","TRB","YFII","RUNE","SUSHI","SRM","BZRX","EGLD","SOL","ICX","STORJ","BLZ","UNI","AVAX","FTM","HNT","ENJ","FLM","TOMO","REN","KSM","NEAR","AAVE","FIL","RSR","LRC","MATIC","OCEAN","CVC","BEL","CTK","ALPHA","ZEN","SKL","GRT","1INCH","AKRO","CHZ","SAND","ANKR","LUNA","BTS","LIT","UNFI","DODO","REEF","RVN","SFP","XEM","COTI","CHR","MANA","ALICE","HBAR","ONE","LINA","STMX","DENT","CELR","HOT","MTL","OGN","BTT","SC","AXS","NKN","SNX","DGB","ICP","BAKE","GTC","KEEP","TLM","IOTX","AUDIO","RAY","AR","ATA","C98","CELO","DYDX","GALA","MASK","1000SHIB","1000XEC","BTCDOM","DEFI","KLAY"]
+client = BinanceAPI()
+trade_open_list = []
+trade_cnt = 0
+
+bin_features = mysql.connector.connect(
+	host="92.205.3.110",
+	user="crypto_feauters_test",
+	password="crypto_feauters_test",
+	database="binancefutures",
+)
+global_param = Database.get_global_parameters(bin_features)
+# print(global_param)
+MAX_TRADES = int(global_param[4][1])
+enable_robot = global_param[5][1]
+max_loss_per = float(global_param[7][1])
+max_profit_per = float(global_param[8][1])
+freee_profit = int(global_param[9][1])
+freee_loss = int(global_param[10][1])
+freee_close_all = int(global_param[11][1])
+freee_until = float(global_param[12][1])
+rsi_period = global_param[13][1]
+rsi_timeframe = global_param[14][1]
+rsi_buy = float(global_param[15][1])
+rsi_sell = float(global_param[16][1])
+min__change = float(global_param[17][1])
+changeper_timeframe = global_param[19][1]
+param_default_sl_perc = float(global_param[20][1])
+param_default_tp_perc = float(global_param[21][1])
+param_trailing_start_perc = float(global_param[22][1])
+param_trailing_perc = float(global_param[23][1])
+
+# filename = "%s.txt" % date
+# f = open('1.txt', 'a')
+# f.write('strstr')
+# f.close
+#Order function for client
+
+def binance_order(symbol, openpostion, ordertype):
+	bin_features = mysql.connector.connect(
+		host="92.205.3.110",
+		user="crypto_feauters_test",
+		password="crypto_feauters_test",
+		database="binancefutures",
+	)
+	coin_full = symbol
+	coin_abr = coin_full[:-4]
+	clients = Database.get_clients(bin_features)
+	for data in clients:
+		# trade = client_trade
+		fixedamount = 0
+		client_email = data[1]
+		client_isfuture = data[7]
+		leverage = int(data[5])
+		spotamount = float(data[6])
+		apikey = data[3]
+		secretkey = data[4]
+		fixedamount = spotamount * leverage
+		if len(apikey) > 10 and len(secretkey) > 10:
+			if float(client_isfuture) == float(1):
+				print("The trade of Client %s" % client_email)
+				print("leverage:", leverage, "fixedamount:", spotamount)
+				# exchange_id = 'binance'
+				# exchange_class = '\\ccxt\\'.join(exchange_id)
+				# print(exchange_class)
+				binance = ccxt.binance({
+					"apiKey":apikey,
+					"secret": secretkey,
+					# "apiKey":"NGKVf4rdsSVULydWsknBkOWQ2kys3IgdvoyM8oY0zavTMJIbjr5O7y4HDXUBmMcp",
+					# "secret": "7CfZ3SO9zCJHDavcwreUA2ohkWhApkZxEcrWDTtpJHdusc9IIvw4wsjwPFqysfxM",
+					"options": {"defaultType": "future", 'adjustForTimeDifference' : True},
+					"timeout": 60000,
+					"enableRateLimit": True,
+				})
+
+				objsym = client.get_price(coin_full)
+				if objsym['code'] == -1003:
+					return
+				curpice = float(objsym['price'])
+				fixedamount = float(fixedamount) * 1. / curpice
+				binance.load_markets()
+
+				binance.verbose = False
+				params = {
+					'symbol' : coin_full,
+					'leverage' : leverage,
+					'recvWindow' : 50000
+				}
+				balance = binance.fetch_balance()
+				free_balance = float(balance['info']['maxWithdrawAmount'])
+				if openpostion == 1:
+					if(free_balance > spotamount):
+						symbol = "%s/USDT" % coin_abr
+						binance.fapiPrivate_post_leverage(params)
+						binance.create_order(symbol, "MARKET", ordertype, fixedamount, None, params)
+				if openpostion == 2:
+					position = balance['info']['positions']
+					posamt = 0
+					for pos in position:
+						if(pos['symbol'] == coin_full):
+							posamt = abs(pos['positionAmt'])
+					if(float(posamt) > 0):
+						if(ordertype == 'BUY'):
+							rev = 'CLOSE'
+						else:
+							rev = 'BUY'
+						binance.fapiPrivate_post_leverage(params)
+						symbol = "%s/USDT" % coin_abr
+						binance.createOrder(symbol, "MARKET", rev, posamt, None, params)		
+
+
+
+# def manual_order_close(data, coin_abr, flag):
+# 	if flag == 1:
+# 		ordertype = "BUY"
+# 	elif flag == 2:
+# 		ordertype = "SELL"
+# 	# trade = client_trade
+# 	coin_full = "%sUSDT" % coin_abr
+# 	binance_order(coin_full, 2, ordertype)
+
+# def client_order(data, coin_abr, flag):
+# 	if flag == 1:
+# 		ordertype = "BUY"
+# 	elif flag == 2:
+# 		ordertype = "SELL"
+# 	# trade = client_trade
+# 	coin_full = "%sUSDT" % coin_abr
+# 	client_email = data[1]
+# 	client_isfuture = data[7]
+# 	apikey = data[3]
+# 	secretkey = data[4]
+# 	leverage = float(data[5])
+# 	spotamount = float(data[6])
+# 	fixedamount = 0
+# 	fixedamount = spotamount * leverage
+# 	if len(apikey) > 10 and len(secretkey) > 10:
+# 		if float(client_isfuture) == float(1):
+# 			try:
+# 				print("The trade of Client %s" % client_email)
+# 				print("leverage:", leverage, "fixedamount:", spotamount)
+# 				# exchange_id = 'binance'
+# 				# exchange_class = '\\ccxt\\'.join(exchange_id)
+# 				# print(exchange_class)
+# 				binance = ccxt.binance({
+# 					# "apiKey":apikey,
+# 					# "secret": secretkey,
+# 					"apiKey":"NGKVf4rdsSVULydWsknBkOWQ2kys3IgdvoyM8oY0zavTMJIbjr5O7y4HDXUBmMcp",
+# 					"secret": "7CfZ3SO9zCJHDavcwreUA2ohkWhApkZxEcrWDTtpJHdusc9IIvw4wsjwPFqysfxM",
+# 					"options": {"defaultType": "future", 'adjustForTimeDifference' : True},
+# 					"timeout": 60000,
+# 					"enableRateLimit": True,
+# 				})
+
+# 				objsym = client.get_price(coin_full)
+# 				curpice = float(objsym['price'])
+# 				fixedamount = float(fixedamount) * 1. / curpice
+# 				binance.load_markets()
+# 				binance.verbose = False
+# 				params = {
+# 					'symbol' : coin_full,
+# 					'leverage' : leverage,
+# 					'recvWindow' : 50000
+# 				}
+# 				balance = binance.fetch_balance()
+# 				free_balance = float(balance['info']['maxWithdrawAmount'])
+# 			except (RuntimeError, TypeError, NameError):
+# 				pass
+# 			if(free_balance > spotamount):
+# 				response3 = binance.fapiPrivate_post_leverage(params)
+# 				symbol = "%s/USDT" % coin_abr
+# 				response4 = binance.create_order(symbol, "MARKET", ordertype, fixedamount, None, params)
+
+#Order Close Function
+def auto_order_close(data):
+	bin_features = mysql.connector.connect(
+		host="92.205.3.110",
+		user="crypto_feauters_test",
+		password="crypto_feauters_test",
+		database="binancefutures",
+	)
+	trade_id = data[0]
+	symbol = data[1]
+	leverage = data[2]
+	entryprice = float(data[3])
+	ordertype = data[9]
+	amount = data[11]
+	objsym = client.get_price(symbol)
+	print(type(objsym))
+	closedprice = float(objsym['price'])
+	newsl = data[12]
+	newtp = data[13]
+	current_time = int(time.time())
+	if	ordertype == "BUY":
+		reversedentry = entryprice - closedprice
+		perc = ((reversedentry * 100) / closedprice ) * leverage
+		profitnusd = perc * amount / 100
+		if(reversedentry > 0):
+			profitnusd = -(abs(profitnusd))
+			profitnusd_db = profitnusd
+		else:
+			profitnusd = abs(profitnusd)
+			profitnusd_db = 2. * profitnusd
+		profitpercentage = profitnusd * 100 / amount
+		if(profitpercentage >= param_trailing_start_perc and reversedentry < 0):
+			_mix = (entryprice + closedprice) / 2.
+			newsl = param_trailing_perc * _mix / 100
+			newsl = _mix  + newsl
+			Database.update_tradesl(trade_id, newsl, bin_features)
+		print('profit/loss', profitnusd, profitpercentage)
+		if(closedprice <= newsl and newsl > 0) or (closedprice >= newtp and newtp > 0):
+			Database.update_trade(trade_id, profitnusd_db, closedprice, current_time, bin_features)
+			binance_order(symbol, 2, ordertype)
+			print(symbol, ordertype, profitnusd, "trade closed")	
+			return True
+	elif ordertype == 'SELL':
+		reversedentry = closedprice - entryprice
+		perc = ((reversedentry * 100) / entryprice) * leverage
+		profitnusd = perc * amount / 100
+		if(reversedentry > 0):
+			profitnusd = -abs(profitnusd)
+			profitnusd_db = profitnusd
+		else:
+			profitnusd = abs(profitnusd)
+			profitnusd_db = 2. * profitnusd
+		profitpercentage = profitnusd * 100 / amount
+		if(profitpercentage >= param_trailing_start_perc and reversedentry < 0):
+			_mix = (entryprice + closedprice) / 2.
+			newsl = param_trailing_perc * _mix / 100
+			newsl = _mix  - newsl
+			Database.update_tradesl(trade_id, newsl, bin_features)
+		print('profit/loss', profitnusd, profitpercentage)
+		if(closedprice <= newtp and newtp > 0) or (closedprice >= newsl and newsl > 0):
+			Database.update_trade(trade_id, profitnusd_db, closedprice, current_time, bin_features)
+			binance_order(symbol, 2, ordertype)
+			print(symbol, ordertype, profitnusd, "trade closed")
+			return True
+	return False
+
+
+#Thread function for coin
+def coin_thread(i):
+	global trade_open_list
+	binance_features = mysql.connector.connect(
+		host="92.205.3.110",
+		user="crypto_feauters_test",
+		password="crypto_feauters_test",
+		database="binancefutures",
+	)
+	coin_abr = i
+	coin_full = "%sUSDT" % coin_abr
+	td_close = Database.get_flag_orders(coin_full, binance_features)	
+	if td_close:
+		print(td_close)
+		coin_close_abr = td_close[1]
+		print(coin_close_abr)
+		order_flag = td_close[9]
+		Database.close_order_finally(coin_close_abr, binance_features)
+		binance_order(coin_close_abr, 2, order_flag)
+		print('trade closed')	
+	else :
+		tradeopenexist = Database.trade_openandexist(coin_full, binance_features)
+		if tradeopenexist[0] > 0:
+			data = Database.trade_opendata(coin_full, binance_features)
+			if auto_order_close(data) == False:
+				return
+	# RSI Calculate and get LastVal
+	data = client.get_klines_v1(coin_full, rsi_timeframe, 500)
+	closes = []
+	for ind in data:
+		if ind == None:
+			return
+		temp = float(ind[1])
+		closes.append(temp)
+	clsarray = rsiFunc(closes, rsi_period)
+	lastval = clsarray[len(clsarray)-1]
+	buysell_flag = 0
+	print(coin_full, lastval)
+	if(lastval <= rsi_buy):
+		print('Buy Mode')
+		buysell_flag = 1
+		order_type = "BUY"
+	elif(lastval >= rsi_sell):
+		print('Sell Mode')
+		buysell_flag = 2
+		order_type = "SELL"
+	else:
+		return
+	data = client.get_klines_v1(coin_full, changeper_timeframe, 1)
+	changeper_ = 0
+	changeper_ = float(data[0][4]) * 100. / float(data[0][1])
+	if(changeper_ >= 100.):
+		changeper_ -= 100.
+	else:
+		changeper_ = -(100. - changeper_)
+	if (buysell_flag == 1 and ((changeper_ > 0 and changeper_ >= min__change) or min__change == 0)) or (buysell_flag == 2 and ((changeper_ < 0 and changeper_ <= min__change) or min__change == 0)):	
+		marketprice = client.get_price(coin_full)
+		marketprice = float(marketprice['price'])
+		cn_digits = Database.get_coindigit(coin_abr, binance_features)
+		cn_digits = int(cn_digits[0])
+		# print(coin_full, cn_digits)
+		# OpenTrade	- Orders start for clients
+		if(buysell_flag == 1):
+			trade_sl = round(((100. - param_default_sl_perc) * marketprice ) / 100., cn_digits)
+			trade_tp = round(((100. + param_default_tp_perc) * marketprice ) / 100., cn_digits)
+		else:
+			trade_tp = round(((100. - param_default_tp_perc) * marketprice ) / 100., cn_digits)
+			trade_sl = round(((100. + param_default_sl_perc) * marketprice ) / 100., cn_digits)
+		current_time = int(time.time())
+		trade_open_list.append([coin_full, 1, marketprice, 0, current_time, 0, 0, None, order_type, cn_digits, 100, trade_sl, trade_tp, None, 'ROBOTNOTHAND', None, None])
+		binance_order(coin_full, 1, order_type)
+
+def all_opentrades_check(max_loss_per, max_profit_per):
+	bin_features = mysql.connector.connect(
+		host="92.205.3.110",
+		user="crypto_feauters_test",
+		password="crypto_feauters_test",
+		database="binancefutures",
+	)
+	open_trades = Database.trade_all_openandexist(bin_features)
+	cumuusd = 0
+	trade_close_data = []
+	for data in open_trades:
+		trade_id = data[0]
+		symbol = data[1]
+		leverage = data[2]
+		entryprice = float(data[3])
+		ordertype = data[9]
+		amount = data[11]
+		try:
+			objsym = client.get_price(symbol)
+		except:
+			time.sleep(30)
+		try:
+			closedprice = float(objsym['price'])
+			current_time = int(time.time())
+			if	ordertype == "BUY":
+				reversedentry = entryprice - closedprice
+				perc = ((reversedentry * 100) / closedprice ) * leverage
+				profitnusd = perc * amount / 100
+				if(reversedentry > 0):
+					profitnusd = -(abs(profitnusd))
+					profitnusd_db = profitnusd
+				else:
+					profitnusd = abs(profitnusd)
+					profitnusd_db = 2 * profitnusd
+				trade_close_data.append([trade_id, profitnusd_db, closedprice, current_time, symbol, ordertype])
+				print(symbol, profitnusd)
+				cumuusd = cumuusd + profitnusd
+			elif ordertype == 'SELL':
+				reversedentry = closedprice - entryprice
+				perc = ((reversedentry * 100) / entryprice) * leverage
+				profitnusd = perc * amount / 100
+				if(reversedentry > 0):
+					profitnusd = -abs(profitnusd)
+					profitnusd_db = profitnusd
+				else:
+					profitnusd = abs(profitnusd)
+					profitnusd_db = 2 * profitnusd
+				trade_close_data.append([trade_id, profitnusd_db, closedprice, current_time, symbol, ordertype])
+				print(symbol, profitnusd)
+				cumuusd = cumuusd + profitnusd
+		except:
+			#crash error
+			time.sleep(30)
+	print("max-percent", cumuusd)
+	if(cumuusd > max_profit_per) or (cumuusd < -(max_loss_per)) :
+		for temp in trade_close_data:
+			Database.update_trade(temp[0], temp[1], temp[2], temp[3], bin_features)
+			binance_order(temp[4], 2, temp[5])
+		# freezing time -- search this text
+		x = 60 * 10 # 5min - 300s
+		time.sleep(x)
+
+#Threads start for coin-arrays ---Main Thread
+while(True):
+	#global parameters
+	all_opentrades_check(max_loss_per, max_profit_per)
+	bin_features = mysql.connector.connect(
+		host="92.205.3.110",
+		user="crypto_feauters_test",
+		password="crypto_feauters_test",
+		database="binancefutures",
+	)
+	if client.ping():
+		time.sleep(20)
+	global_param = Database.get_global_parameters(bin_features)
+	MAX_TRADES = int(global_param[4][1])
+	enable_robot = global_param[5][1]
+	if(enable_robot == 'false'):
+		print("Bot is disabled!")
+		break
+	print(global_param[15], global_param[16])
+	max_loss_per = float(global_param[7][1])
+	max_profit_per = float(global_param[8][1])
+	freee_profit = int(global_param[9][1])
+	freee_loss = int(global_param[10][1])
+	freee_close_all = int(global_param[11][1])
+	freee_until = float(global_param[12][1])
+	rsi_period = int(global_param[13][1])
+	rsi_timeframe = global_param[14][1]
+	rsi_buy = float(global_param[15][1])
+	rsi_sell = float(global_param[16][1])
+	min__change = float(global_param[17][1])
+	changeper_timeframe = global_param[19][1]
+	param_default_sl_perc = float(global_param[20][1])
+	param_default_tp_perc = float(global_param[21][1])
+	param_trailing_start_perc = float(global_param[22][1])
+	param_trailing_perc = float(global_param[23][1])
+	print(param_trailing_perc, param_trailing_start_perc)
+	thread_actions = []
+	trade_open_list = []
+	for i in arraycoins:
+		thread = threading.Thread(target=coin_thread, args=(i,))
+		thread_actions.append(thread)
+		thread.start()
+	for thread_ in thread_actions:
+		thread_.join()
+	count = Database.trade_openandexistcount(bin_features)
+	count = count[0]
+	print('exist count', count)
+	print(trade_open_list)
+	for data in trade_open_list:
+		count = count + 1
+		if(count <= MAX_TRADES):
+			Database.write(data, bin_features)
+		else:
+			print("There are MAX trades!")
+			break
+	if count > 0:
+		all_opentrades_check(max_loss_per, max_profit_per)
+	# time.sleep(5)
+
+-----------binance----------
+import time
+import hashlib
+#from typing import ParamSpec
+import requests
+import hmac
+
+try:
+    from urllib import urlencode
+# python3
+except ImportError:
+    from urllib.parse import urlencode
+ 
+class BinanceAPI:
+    
+    BASE_URL = "https://www.binance.com/api/v1"
+    BASE_URL_V3 = "https://api.binance.com/api/v3"
+    PUBLIC_URL = "https://www.binance.com/exchange/public/product"
+
+    # def __init__(self, key, secret):
+    #     self.key = key
+    #     self.secret = secret
+
+    def __init__(self) -> None:
+        pass
+
+    def ping(self):
+        path = "%s/ping" % self.BASE_URL_V3
+        return requests.get(path, timeout=30, verify=True).json()
+    
+    def get_history(self, market, limit=50):
+        path = "%s/historicalTrades" % self.BASE_URL
+        params = {"symbol": market, "limit": limit}
+        return self._get_no_sign(path, params)
+        
+    def get_trades(self, market, limit=50):
+        path = "%s/trades" % self.BASE_URL
+        params = {"symbol": market, "limit": limit}
+        return self._get_no_sign(path, params)
+        
+    def get_klines(self, market, interval, startTime, endTime):
+        path = "%s/klines" % self.BASE_URL_V3
+        params = {"symbol": market, "interval":interval, "startTime":startTime, "endTime":endTime}
+        return self._get_no_sign(path, params)
+    #song_code
+    def get_klines_v1(self, market, interval, limit):
+        path = "%s/klines" % self.BASE_URL_V3
+        params = {"symbol": market, "interval":interval, "limit":limit}
+        return self._get_no_sign(path,params)
+    
+    def get_price(self, market):
+        path="%s/ticker/price" % self.BASE_URL_V3
+        params = {"symbol" : market}
+        return self._get_no_sign(path,params)
+    def get_ticker(self, market):
+        path = "%s/ticker/24hr" % self.BASE_URL
+        params = {"symbol": market}
+        return self._get_no_sign(path, params)
+
+    def get_order_books(self, market, limit=50):
+        path = "%s/depth" % self.BASE_URL
+        params = {"symbol": market, "limit": limit}
+        return self._get_no_sign(path, params)
+
+    def get_account(self):
+        path = "%s/account" % self.BASE_URL_V3
+        return self._get(path, {})
+
+    def get_products(self):
+        return requests.get(self.PUBLIC_URL, timeout=30, verify=True).json()
+   
+    def get_server_time(self):
+        path = "%s/time" % self.BASE_URL_V3
+        return requests.get(path, timeout=30, verify=True).json()
+    
+    def get_exchange_info(self):
+        path = "%s/exchangeInfo" % self.BASE_URL
+        return requests.get(path, timeout=30, verify=True).json()
+
+    def get_open_orders(self, market, limit = 100):
+        path = "%s/openOrders" % self.BASE_URL_V3
+        params = {"symbol": market}
+        return self._get(path, params)
+    
+    def get_my_trades(self, market, limit = 50):
+        path = "%s/myTrades" % self.BASE_URL_V3
+        params = {"symbol": market, "limit": limit}
+        return self._get(path, params)
+
+    def buy_limit(self, market, quantity, rate):
+        path = "%s/order" % self.BASE_URL_V3
+        params = self._order(market, quantity, "BUY", rate)
+        return self._post(path, params)
+
+    def sell_limit(self, market, quantity, rate):
+        path = "%s/order" % self.BASE_URL_V3
+        params = self._order(market, quantity, "SELL", rate)
+        return self._post(path, params)
+
+    def buy_market(self, market, quantity):
+        path = "%s/order" % self.BASE_URL_V3
+        params = self._order(market, quantity, "BUY")
+        return self._post(path, params)
+
+    def sell_market(self, market, quantity):
+        path = "%s/order" % self.BASE_URL_V3
+        params = self._order(market, quantity, "SELL")
+        return self._post(path, params)
+
+    def query_order(self, market, orderId):
+        path = "%s/order" % self.BASE_URL_V3
+        params = {"symbol": market, "orderId": orderId}
+        return self._get(path, params)
+
+    def cancel(self, market, order_id):
+        path = "%s/order" % self.BASE_URL_V3
+        params = {"symbol": market, "orderId": order_id}
+        return self._delete(path, params)
+
+    def _get_no_sign(self, path, params={}):
+        query = urlencode(params)
+        url = "%s?%s" % (path, query)
+        return requests.get(url, timeout=30, verify=True).json()
+    
+    def _sign(self, params={}):
+        data = params.copy()
+
+        ts = int(1000 * time.time())
+        data.update({"timestamp": ts})
+        h = urlencode(data)
+        b = bytearray()
+        b.extend(self.secret.encode())
+        signature = hmac.new(b, msg=h.encode('utf-8'), digestmod=hashlib.sha256).hexdigest()
+        data.update({"signature": signature})
+        return data
+
+    def _get(self, path, params={}):
+        params.update({"recvWindow": config.recv_window})
+        query = urlencode(self._sign(params))
+        url = "%s?%s" % (path, query)
+        header = {"X-MBX-APIKEY": self.key}
+        return requests.get(url, headers=header, \
+            timeout=30, verify=True).json()
+
+    def _post(self, path, params={}):
+        params.update({"recvWindow": config.recv_window})
+        query = urlencode(self._sign(params))
+        url = "%s" % (path)
+        header = {"X-MBX-APIKEY": self.key}
+        return requests.post(url, headers=header, data=query, \
+            timeout=30, verify=True).json()
+
+    def _order(self, market, quantity, side, rate=None):
+        params = {}
+         
+        if rate is not None:
+            params["type"] = "LIMIT"
+            params["price"] = self._format(rate)
+            params["timeInForce"] = "GTC"
+        else:
+            params["type"] = "MARKET"
+
+        params["symbol"] = market
+        params["side"] = side
+        params["quantity"] = '%.8f' % quantity
+        
+        return params
+           
+    def _delete(self, path, params={}):
+        params.update({"recvWindow": config.recv_window})
+        query = urlencode(self._sign(params))
+        url = "%s?%s" % (path, query)
+        header = {"X-MBX-APIKEY": self.key}
+        return requests.delete(url, headers=header, \
+            timeout=30, verify=True).json()
+
+    def _format(self, price):
+        return "{:.8f}".format(price)
+
+
+----------database---------
+# -*- coding: UTF-8 -*-
+import mysql.connector
+
+# binance_features = mysql.connector.connect(
+# 	host="localhost",
+# 	user="root",
+# 	password="",
+# 	database="binfutures",
+# )
+
+class Database():
+         
+    # Database (Todo: Not complated)
+    @staticmethod
+    def write(data, binance_features):
+        '''    
+        Save order
+        data = orderid,symbol,amount,price,side,quantity,profit
+        Create a database connection
+        '''
+        temp = []       
+        for tmp in data:
+            if tmp == None:
+                tmp = 'NULL'
+            temp.append(tmp)
+        cur = binance_features.cursor()
+        cur.execute("INSERT INTO test_trades (trade_symbol, trade_leverage, trade_entryprice, trade_closedprice, trade_openedat, trade_closedat, trade_profit, trade_hash, trade_type, trade_coin_digits, trade_amount, trade_sl, trade_tp, trade_closereasons, trade_by, trade_estimatedloss, trade_estimatedprofit) VALUES ('%s','%s','%s','%s','%s','%s','%s','%s','%s','%s','%s','%s','%s','%s','%s','%s','%s')" % (temp[0], temp[1], temp[2], temp[3], temp[4], temp[5], temp[6], temp[7], temp[8], temp[9], temp[10], temp[11], temp[12], temp[13], temp[14], temp[15], temp[16]))
+        cur.close()
+        binance_features.commit()
+
+    @staticmethod
+    def update_trade(trade_id, profitnusd_db, closedprice, current_time, bin_features):
+        cur = bin_features.cursor()
+        cur.execute("update test_trades set trade_closedprice = '%s', trade_closedat= '%s',trade_profit = '%s', trade_closereasons='CLOSEDBYPROVIDER' where trade_id='%s'" % (closedprice, current_time, profitnusd_db, trade_id))
+        cur.close()
+        bin_features.commit()
+
+    
+    @staticmethod
+    def read(orderid, binance_features):
+        '''
+        Query order info by id
+        :param orderid: the buy/sell order id
+        :return:
+        '''
+        cur = binance_features.cursor()
+        cur.execute('SELECT * FROM orders WHERE orderid = ?', (orderid,))
+
+        return cur.fetchone()
+    
+    @staticmethod
+    def get_coin_array(binance_features):
+        coin_array = "SELECT coin_abr from coin_name where coin_isvisible = 1"
+        binance_cursor = binance_features.cursor()
+        binance_cursor.execute(coin_array)
+        coin_array = binance_cursor.fetchall()
+        binance_cursor.close()
+        return coin_array
+
+    @staticmethod
+    def get_global_parameters(binance_features):
+        global_query = "SELECT param_name, param_value from global_parameters"
+        binance_cursor = binance_features.cursor()
+        binance_cursor.execute(global_query)
+        global_parameters = binance_cursor.fetchall()      
+        binance_cursor.close()      
+        return global_parameters
+
+    @staticmethod
+    def trade_openandexistcount(binance_features):
+        query = "select count(trade_id) from test_trades where trade_by = 'ROBOTNOTHAND' and   trade_closedat = 0 "
+        binace_cursor = binance_features.cursor()
+        binace_cursor.execute(query)
+        count = binace_cursor.fetchone()
+        return count
+
+    @staticmethod
+    def trade_all_openandexist(binance_features):
+        query = "select * from test_trades where trade_by = 'ROBOTNOTHAND' and   trade_closedat = 0 "
+        binace_cursor = binance_features.cursor()
+        binace_cursor.execute(query)
+        data = binace_cursor.fetchall()
+        binace_cursor.close()
+        return data
+
+    @staticmethod
+    def trade_openandexist(symbol, binance_features):
+        query = "select count(trade_id) from test_trades where trade_symbol = '%s' and trade_by = 'ROBOTNOTHAND' and   trade_closedat = 0" % symbol
+        binace_cursor = binance_features.cursor()
+        binace_cursor.execute(query)
+        is_exist = binace_cursor.fetchone()
+        binace_cursor.close()
+        return is_exist
+
+    @staticmethod
+    def trade_opendata(symbol, binance_features):
+        query = "select * from test_trades where trade_symbol = '%s' and trade_by = 'ROBOTNOTHAND' and   trade_closedat = 0" % symbol
+        binace_cursor = binance_features.cursor()
+        binace_cursor.execute(query)
+        data = binace_cursor.fetchone()
+        binace_cursor.close()
+        return data
+    @staticmethod
+    def get_coindigit(symbol, binance_features):
+        query = "select coin_digits from coin_name where coin_abr = '%s'" % symbol
+        binace_cursor = binance_features.cursor()
+        binace_cursor.execute(query)
+        cn_digits = binace_cursor.fetchone()
+        binace_cursor.close()
+        return cn_digits
+
+    @staticmethod
+    def get_clients(binance_features):
+        query = "select client_id, client_email, client_pass, binance_apikey, binance_secretkey, binance_leverage, binance_lotamountpertrade,client_isfutures,client_regularbinance from tbl_client where client_enablefutures = '1'"
+        binace_cursor = binance_features.cursor()
+        binace_cursor.execute(query)
+        client_data = binace_cursor.fetchall()
+        binace_cursor.close()
+        return client_data
+
+    @staticmethod
+    def get_flag_orders(symbol, binance_features):
+        query = "select * from test_trades where trade_flag = 1 and trade_symbol = '%s'" % symbol
+        binace_cursor = binance_features.cursor()
+        binace_cursor.execute(query)
+        data = binace_cursor.fetchone()
+        return data
+
+    @staticmethod
+    def close_order_finally(symbol, binance_features):
+        query = "update test_trades set trade_flag = 0 where trade_flag = 1 and trade_symbol = '%s'" % symbol
+        binace_cursor = binance_features.cursor()
+        binace_cursor.execute(query)
+        binace_cursor.close()
+        binance_features.commit()
+
+    @staticmethod
+    def update_tradesl(id, tradesl, binance_features):
+        query = "update test_trades set trade_sl = '%s' where trade_id = '%s'" % (tradesl, id)
+        binace_cursor = binance_features.cursor()
+        binace_cursor.execute(query)
+        binace_cursor.close()
+        binance_features.commit()
+        
+
+
+
